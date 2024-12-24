@@ -103,12 +103,12 @@ def ask_gpt(prompt, response_json=True, valid_def=None, log_title='default'):
                 time.sleep(2)
             else:
                 raise Exception(f"Still failed after {max_retries} attempts: {e}")
+                
     with LOCK:
         if log_title != 'None':
-            save_log(api_set["model"], prompt, response_data, log_title=log_title)
-
+            save_log(api_set["model"], prompt, response_data, log_title)
+    
     return response_data
-
 
 if __name__ == '__main__':
     print(ask_gpt('hi there hey response in json format, just return 200.' , response_json=True, log_title=None))

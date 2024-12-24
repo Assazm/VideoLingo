@@ -1,16 +1,57 @@
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import warnings
 warnings.filterwarnings("ignore")
-
 import whisperx
 import torch
-from typing import Dict
-import librosa
 from rich import print as rprint
-import subprocess
 import tempfile
+import subprocess
+import json
+from typing import Dict, Any, Optional, Union, List, Tuple
+from collections import defaultdict, OrderedDict, Counter
+from omegaconf.listconfig import ListConfig
+from omegaconf.base import ContainerMetadata
+from omegaconf.dictconfig import DictConfig
+from torch.serialization import add_safe_globals
+
+# Add all necessary classes to safe globals
+add_safe_globals([
+    # omegaconf classes
+    ListConfig,
+    ContainerMetadata,
+    DictConfig,
+    # typing classes
+    Any,
+    Optional,
+    Union,
+    Dict,
+    List,
+    Tuple,
+    # built-in classes
+    list,
+    dict,
+    tuple,
+    str,
+    int,
+    float,
+    bool,
+    # collections classes
+    defaultdict,
+    OrderedDict,
+    Counter
+])
+
+# Monkey patch torch.load to use weights_only=False by default
+original_torch_load = torch.load
+def safe_torch_load(*args, **kwargs):
+    kwargs['weights_only'] = False
+    return original_torch_load(*args, **kwargs)
+torch.load = safe_torch_load
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import librosa
+import subprocess
 import time
 
 from core.config_utils import load_key
@@ -30,7 +71,7 @@ def check_hf_mirror() -> str:
     }
     fastest_url = f"https://{mirrors['Official']}"
     best_time = float('inf')
-    rprint("[cyan]🔍 Checking HuggingFace mirrors...[/cyan]")
+    rprint("[cyan]Checking HuggingFace mirrors...[/cyan]")
     for name, domain in mirrors.items():
         try:
             if os.name == 'nt':
@@ -44,30 +85,30 @@ def check_hf_mirror() -> str:
                 if response_time < best_time:
                     best_time = response_time
                     fastest_url = f"https://{domain}"
-                rprint(f"[green]✓ {name}:[/green] {response_time:.2f}s")
+                rprint(f"[green] {name}: {response_time:.2f}s[/green]")
         except:
-            rprint(f"[red]✗ {name}:[/red] Failed to connect")
+            rprint(f"[red] {name}: Failed to connect[/red]")
     if best_time == float('inf'):
-        rprint("[yellow]⚠️ All mirrors failed, using default[/yellow]")
-    rprint(f"[cyan]🚀 Selected mirror:[/cyan] {fastest_url} ({best_time:.2f}s)")
+        rprint("[yellow]All mirrors failed, using default[/yellow]")
+    rprint(f"[cyan]Selected mirror: {fastest_url} ({best_time:.2f}s)[/cyan]")
     return fastest_url
 
 def transcribe_audio(audio_file: str, start: float, end: float) -> Dict:
     os.environ['HF_ENDPOINT'] = check_hf_mirror() #? don't know if it's working...
     WHISPER_LANGUAGE = load_key("whisper.language")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    rprint(f"🚀 Starting WhisperX using device: {device} ...")
+    rprint(f"Starting WhisperX using device: {device} ...")
     
     if device == "cuda":
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         batch_size = 16 if gpu_mem > 8 else 2
         compute_type = "float16" if torch.cuda.is_bf16_supported() else "int8"
-        rprint(f"[cyan]🎮 GPU memory:[/cyan] {gpu_mem:.2f} GB, [cyan]📦 Batch size:[/cyan] {batch_size}, [cyan]⚙️ Compute type:[/cyan] {compute_type}")
+        rprint(f"[cyan]GPU memory: {gpu_mem:.2f} GB, Batch size: {batch_size}, Compute type: {compute_type}[/cyan]")
     else:
         batch_size = 1
         compute_type = "int8"
-        rprint(f"[cyan]📦 Batch size:[/cyan] {batch_size}, [cyan]⚙️ Compute type:[/cyan] {compute_type}")
-    rprint(f"[green]▶️ Starting WhisperX for segment {start:.2f}s to {end:.2f}s...[/green]")
+        rprint(f"[cyan]Batch size: {batch_size}, Compute type: {compute_type}[/cyan]")
+    rprint(f"[green]Starting WhisperX for segment {start:.2f}s to {end:.2f}s...[/green]")
     
     try:
         if WHISPER_LANGUAGE == 'zh':
@@ -78,13 +119,26 @@ def transcribe_audio(audio_file: str, start: float, end: float) -> Dict:
             local_model = os.path.join(MODEL_DIR, model_name)
             
         if os.path.exists(local_model):
-            rprint(f"[green]📥 Loading local WHISPER model:[/green] {local_model} ...")
+            rprint(f"[green]Loading local WHISPER model: {local_model} ...[/green]")
             model_name = local_model
         else:
-            rprint(f"[green]📥 Using WHISPER model from HuggingFace:[/green] {model_name} ...")
+            rprint(f"[green]Using WHISPER model from HuggingFace: {model_name} ...[/green]")
 
-        vad_options = {"vad_onset": 0.500,"vad_offset": 0.363}
-        asr_options = {"temperatures": [0],"initial_prompt": "",}
+        vad_options = {"vad_onset": 0.500, "vad_offset": 0.363}
+        asr_options = {
+            "beam_size": 5,
+            "temperatures": [0],  
+            "best_of": 5,
+            "patience": 1,
+            "length_penalty": 1,
+            "suppress_tokens": [-1],
+            "condition_on_previous_text": False,
+            "initial_prompt": None,
+            "prefix": None,
+            "without_timestamps": False,
+            "max_initial_timestamp": 1.0,
+            "word_timestamps": True
+        }
         whisper_language = None if 'auto' in WHISPER_LANGUAGE else WHISPER_LANGUAGE
         rprint("[bold yellow]**You can ignore warning of `Model was trained with torch 1.10.0+cu102, yours is 2.0.0+cu118...`**[/bold yellow]")
         model = whisperx.load_model(model_name, device, compute_type=compute_type, language=whisper_language, vad_options=vad_options, asr_options=asr_options, download_root=MODEL_DIR)
@@ -136,7 +190,7 @@ def transcribe_audio(audio_file: str, start: float, end: float) -> Dict:
                     word['end'] += start
         return result
     except Exception as e:
-        rprint(f"[red]WhisperX processing error:[/red] {e}")
+        rprint(f"[red]WhisperX processing error: {e}[/red]")
         raise
 
 def enhance_vocals(vocals_ratio=2.50):
@@ -145,7 +199,7 @@ def enhance_vocals(vocals_ratio=2.50):
         return RAW_AUDIO_FILE
         
     try:
-        print(f"[cyan]🎙️ Enhancing vocals with volume ratio: {vocals_ratio}[/cyan]")
+        print(f"[cyan]Enhancing vocals with volume ratio: {vocals_ratio}[/cyan]")
         ffmpeg_cmd = (
             f'ffmpeg -y -i "{VOCAL_AUDIO_FILE}" '
             f'-filter:a "volume={vocals_ratio}" '
@@ -160,7 +214,7 @@ def enhance_vocals(vocals_ratio=2.50):
     
 def transcribe():
     if os.path.exists(CLEANED_CHUNKS_EXCEL_PATH):
-        rprint("[yellow]⚠️ Transcription results already exist, skipping transcription step.[/yellow]")
+        rprint("[yellow]Transcription results already exist, skipping transcription step.[/yellow]")
         return
     
     # step0 Convert video to audio
